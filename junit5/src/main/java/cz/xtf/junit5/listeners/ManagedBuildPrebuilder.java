@@ -1,23 +1,11 @@
 package cz.xtf.junit5.listeners;
 
-import org.junit.platform.engine.TestSource;
-import org.junit.platform.engine.support.descriptor.ClassSource;
-import org.junit.platform.launcher.TestExecutionListener;
-import org.junit.platform.launcher.TestIdentifier;
-import org.junit.platform.launcher.TestPlan;
-
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
-
+import com.fasterxml.jackson.databind.ObjectMapper;
 import cz.xtf.core.bm.BuildManager;
 import cz.xtf.core.bm.BuildManagers;
 import cz.xtf.core.bm.ManagedBuild;
 import cz.xtf.core.config.BuildManagerConfig;
+import cz.xtf.core.config.OpenShiftConfig;
 import cz.xtf.core.config.WaitingConfig;
 import cz.xtf.core.openshift.OpenShift;
 import cz.xtf.core.openshift.OpenShifts;
@@ -32,7 +20,25 @@ import cz.xtf.junit5.extensions.SinceVersionCondition;
 import cz.xtf.junit5.extensions.SkipForCondition;
 import cz.xtf.junit5.interfaces.BuildDefinition;
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.openshift.api.model.Image;
+import io.fabric8.openshift.api.model.ImageList;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.MediaType;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import org.junit.platform.engine.TestSource;
+import org.junit.platform.engine.support.descriptor.ClassSource;
+import org.junit.platform.launcher.TestExecutionListener;
+import org.junit.platform.launcher.TestIdentifier;
+import org.junit.platform.launcher.TestPlan;
+
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 @Slf4j
 public class ManagedBuildPrebuilder implements TestExecutionListener {
@@ -57,9 +63,9 @@ public class ManagedBuildPrebuilder implements TestExecutionListener {
 		// so we try to be nice and wait until there are available capacity in the build manager namespace.
 		final OpenShift buildManagerOpenShift = OpenShifts.master(BuildManagerConfig.namespace());
 		Waiter runningBuildsBelowCapacity = new SimpleWaiter(() ->
-			buildManagerOpenShift.getBuilds().stream()
-					.filter(build -> build.getStatus() != null && "Running".equals(build.getStatus().getPhase()))
-					.count() < BuildManagerConfig.maxRunningBuilds()
+				buildManagerOpenShift.getBuilds().stream()
+						.filter(build -> build.getStatus() != null && "Running".equals(build.getStatus().getPhase()))
+						.count() < BuildManagerConfig.maxRunningBuilds()
 		)
 				.timeout(TimeUnit.MILLISECONDS, WaitingConfig.timeout())
 				.reason("Waiting for a free capacity for running builds in " + BuildManagerConfig.namespace() + " namespace.");
@@ -122,6 +128,40 @@ public class ManagedBuildPrebuilder implements TestExecutionListener {
 				deferredWait.run();
 			}
 		}
+
+		// based on property xtf.bm.prevent.image.pruning avoid "oc adm prune images --all=false" from pruning images
+		// note that if "oc adm prune images --all=true" (which is default) deletes those images
+		preventImagesToBePruned();
+
+
+	}
+
+	private void preventImagesToBePruned() {
+		// todo use openshift-client api
+		final OpenShift buildManagerOpenShift = OpenShifts.admin();
+		try {
+			Request request = new Request.Builder().get()
+					.url(OpenShiftConfig.url() + "/apis/image.openshift.io/v1/images").build();
+			String response = OpenShifts.admin().getHttpClient().newCall(request).execute().body().string();
+
+			ObjectMapper objectMapper = new ObjectMapper();
+			ImageList imageList  = objectMapper.readValue(response, ImageList.class);
+
+			String patch = "{\"metadata\": {\"annotations\": {\"openshift.io/image.managed\": \"false\"}}}";
+			RequestBody requestBody = RequestBody.create(MediaType.parse("application/strategic-merge-patch+json"), patch);
+			for (Image image : imageList.getItems()) {
+				if (image.getDockerImageReference().contains(BuildManagerConfig.namespace())) {
+					log.info(image.getDockerImageReference());
+					log.info(image.getMetadata().getName());
+
+					Request pathRequest = new Request.Builder().patch(requestBody)
+							.url(OpenShiftConfig.url() + "/apis/image.openshift.io/v1/images/" + image.getMetadata().getName()).build();
+					log.info(OpenShifts.admin().getHttpClient().newCall(pathRequest).execute().body().string());
+				}
+			}
+		} catch (Exception ex) {
+			log.error("Was not able to annotate images to prevent them from hard pruning (oc adm prune images --all=true)");
+		}
 	}
 
 	private void addBuildDefinition(List<BuildDefinition> buildsToBeBuilt, Set<BuildDefinition> buildsSeen, BuildDefinition buildDefinition) {
@@ -165,5 +205,10 @@ public class ManagedBuildPrebuilder implements TestExecutionListener {
 				});
 			}
 		}
+	}
+
+	public void testPlanExecutionFinished(TestPlan testPlan) {
+		// return annotation which prevents to pruning to true again
+
 	}
 }
