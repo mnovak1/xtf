@@ -5,7 +5,7 @@
     <groupId>cz.xtf</groupId>
     <artifactId>parent</artifactId>
     <packaging>pom</packaging>
-    <version>0.20-SNAPSHOT</version>
+    <version>0.21-pretest-SNAPSHOT</version>
     <name>XTF</name>
 
     <modules>
