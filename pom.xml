@@ -32,6 +32,14 @@
         <tag>0.21</tag>
     </scm>
 
+    <developers>
+        <developer>
+            <id>mnovak1</id>
+            <name>Miroslav Novak</name>
+            <organization>Red Hat</organization>
+        </developer>
+    </developers>
+
     <distributionManagement>
         <repository>
             <id>jboss-releases-repository</id>
